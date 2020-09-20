@@ -1,4 +1,6 @@
-(ns mopr.control.monad)
+(ns mopr.control.monad
+  (:require
+   [promesa.core :as p]))
 
 ;; for contexts to wrap their monadic values in
 ;; a marker type - and support generic lifts
@@ -101,8 +103,8 @@
   (-bind [m wmv f]
     (let [mv (-mv (-lift m wmv))]
       (if (some? mv)
-       (f mv)
-       (MVWrapper. m nil))))
+        (f mv)
+        (MVWrapper. m nil))))
   (-return [m v]
     (MVWrapper. m v))
   (-lift [m wmv]
@@ -191,39 +193,41 @@
 (deftype RWS [lifters]
   Monad
   (-bind [m wmv f]
-    (let [wmv (lift m lifters wmv)]
+    (let [wmv (-lift m wmv)]
       (MVWrapper.
        m
        (fn [{r :reader st :state :as rst}]
          (let [{w :writer st' :state v :val} ((-mv wmv) rst)
                {st'' :state
-                w' :writer} ((-mv (f v)) {:reader r :state st'})]
+                w' :writer} ((-mv (-lift m (f v))) {:reader r :state st'})]
            {:writer ((fnil into []) w w')
             :state st''})))))
   (-return [m v]
     (MVWrapper.
      m
      (fn [{r :reader w :writer st :state}]
-       {:writer nil :state st :val v}))))
+       {:writer nil :state st :val v})))
+  (-lift [m wmv]
+    (lift m lifters wmv)))
 
 (defmethod -lets (.getName RWS)
   [_ m]
   `[~'ask (fn [] (MVWrapper.
-                  ~m
-                  (fn [{r# :reader w# :writer st# :state}]
-                    {:writer nil :state st# :val r#})))
+                 ~m
+                 (fn [{r# :reader w# :writer st# :state}]
+                   {:writer nil :state st# :val r#})))
     ~'tell (fn [v#] (MVWrapper.
-                     ~m
-                     (fn [{r# :reader w# :writer st# :state}]
-                       {:writer [v#] :state st# :val nil})))
+                    ~m
+                    (fn [{r# :reader w# :writer st# :state}]
+                      {:writer [v#] :state st# :val nil})))
     ~'get-state (fn [] (MVWrapper.
-                        ~m
-                        (fn [{r# :reader w# :writer st# :state}]
-                          {:writer nil :state st# :val st#})))
+                       ~m
+                       (fn [{r# :reader w# :writer st# :state}]
+                         {:writer nil :state st# :val st#})))
     ~'put-state (fn [st'#] (MVWrapper.
-                            ~m
-                            (fn [{r# :reader w# :writer st# :state}]
-                              {:writer nil :state st'# :val nil})))])
+                           ~m
+                           (fn [{r# :reader w# :writer st# :state}]
+                             {:writer nil :state st'# :val nil})))])
 
 (def rws-lifters
   {identity-ctx (fn [mv]
@@ -235,66 +239,103 @@
   [wmv rws]
   ((-mv wmv) rws))
 
+(deftype Promise [lifters]
+  Monad
+  (-bind [m wmv f]
+    (let [wmv (-lift m wmv)]
+      (MVWrapper.
+       m
+       (p/chain
+        (-mv wmv)
+        f
+        :mv))))
+  (-return [m v]
+    (MVWrapper. m (p/resolved v)))
+  (-lift [m wmv]
+    (lift m lifters wmv)))
+
+(def promise-lifters
+  {identity-ctx (fn [mv]
+                  (p/resolved mv))})
+
+(def promise-ctx
+  (Promise. promise-lifters))
+
+
 ;; ({:reader r :state st})->Promise<{:val v :writer w :state st}
-;; (defrecord PRWS [pr-success pr-error pr-chain pr-catch]
-;;   Monad
-;;   (-bind [m wmv f]
-;;     (MVWrapper.
-;;      m
-;;      (fn [{r :reader st :state :as r-st}]
-;;        ;; this wants the bind syntax to make it clean...
-;;        (pr-chain
-;;         ((-mv wmv) r-st)
-;;         (fn [{w :writer st' :state v :val}]
-;;           ((-mv (f v)) {:reader r :state st'}))
-;;         (fn [{st'' :state w' :writer}]
-;;           {:writer ((fnil into [] w w'))
-;;            :state st''})))))
-;;   (-return [m v]
-;;     (MVWrapper.
-;;      m
-;;      (fn [{r :reader w :writer st :state}]
-;;        (pr-success
-;;         {:writer nil :state st :val v}))))
-;;   MonadZero
-;;   (-mzero [m]
-;;     (MVWrapper.
-;;      m
-;;      (fn [{r :reader w :writer st :state}]
-;;        (pr-error
-;;         [::mzero
-;;          {:writer [::mzero] :state st :val nil}])))))
+(deftype PRWS [lifters]
+  Monad
+  (-bind [m wmv f]
+    (MVWrapper.
+     m
+     (fn [{r :reader st :state :as r-st}]
+       (p/chain
+        ((-mv (-lift m wmv)) r-st)
+        (fn [{w :writer st' :state v :val :as b1}]
+          (p/all [w ((-mv (-lift m (f v))) {:reader r :state st'})]))
+        (fn [[w {st'' :state w' :writer v' :val :as b2}]]
+          (p/resolved
+           {:writer ((fnil into []) w w')
+            :state st''
+            :val v'}))))))
+  (-return [m v]
+    (MVWrapper.
+     m
+     (fn [{r :reader w :writer st :state}]
+       (p/resolved
+        {:writer nil :state st :val v}))))
+  (-lift [m mv]
+    (lift m lifters mv))
+  MonadZero
+  (-mzero [m]
+    (MVWrapper.
+     m
+     (fn [{r :reader w :writer st :state}]
+       (p/rejected
+        (ex-info
+         ":mopr.control.monad/mzero"
+         {:writer [::mzero] :state st :val nil}))))))
 
-;; (defmethod -lets (.getName PRWS)
-;;   [_ m]
-;;   `[~'ask (fn [] (MVWrapper.
-;;                   ~m
-;;                   (fn [{r# :reader w# :writer st# :state}]
-;;                     (pr-success
-;;                      {:writer nil :state st# :val r#}))))
-;;     ~'tell (fn [v#] (MVWrapper.
-;;                      ~m
-;;                      (fn [{r# :reader w# :writer st# :state}]
-;;                        (pr-success
-;;                         {:writer [v#] :state st# :val nil}))))
-;;     ~'get-state (fn [] (MVWrapper.
-;;                         ~m
-;;                         (fn [{r# :reader w# :writer st# :state}]
-;;                           (pr-success
-;;                            {:writer nil :state st# :val st#}))))
-;;     ~'put-state (fn [st'#] (MVWrapper.
-;;                             ~m
-;;                             (fn [{r# :reader w# :writer st# :state}]
-;;                               (pr-success
-;;                                {:writer nil :state st'# :val nil}))))])
+(defmethod -lets (.getName PRWS)
+  [_ m]
+  `[~'ask (fn [] (MVWrapper.
+                 ~m
+                 (fn [{r# :reader w# :writer st# :state}]
+                   (p/resolved
+                    {:writer nil :state st# :val r#}))))
+    ~'tell (fn [v#] (MVWrapper.
+                    ~m
+                    (fn [{r# :reader w# :writer st# :state}]
+                      (p/resolved
+                       {:writer [v#] :state st# :val nil}))))
+    ~'get-state (fn [] (MVWrapper.
+                       ~m
+                       (fn [{r# :reader w# :writer st# :state}]
+                         (p/resolved
+                          {:writer nil :state st# :val st#}))))
+    ~'put-state (fn [st'#] (MVWrapper.
+                           ~m
+                           (fn [{r# :reader w# :writer st# :state}]
+                             (p/resolved
+                              {:writer nil :state st'# :val nil}))))])
 
-;; (defn prws-ctx
-;;   [{:as pr-fns}]
-;;   (map->PRWS pr-fns))
+(def prws-lifters
+  {identity-ctx (fn [mv]
+                  (fn [{r :reader w :writer st :state}]
+                    (p/resolved
+                     {:writer nil :state st :val mv})))
+   promise-ctx (fn [mv]
+                 (fn [{r :reader w :writer st :state}]
+                   (p/chain
+                    mv
+                    (fn [v]
+                      {:writer nil :state st :val v}))))})
 
-;; (defn run-prws
-;;   [wmv rws]
-;;   ((-mv wmv) rws))
+(def prws-ctx (PRWS. prws-lifters))
+
+(defn run-prws
+  [wmv rws]
+  ((-mv wmv) rws))
 
 (comment
   (require '[mopr.control.monad :as m])
@@ -389,5 +430,17 @@
    {:reader {:bar 10}
     :state {:fip 12}})
 
-
+  @(m/run-prws
+    (m/mlet m/prws-ctx
+      [a (ask)
+       b (get-state)
+       _ (put-state a)
+       c (return (+ a b))
+       _ (tell c)
+       d (m/mlet m/promise-ctx
+           [a (return 100)
+            b (return 100)]
+           (return (* a a)))]
+      (return d))
+    {:reader 10 :state 20})
   )
