@@ -261,6 +261,7 @@
 (def promise-ctx
   (Promise. promise-lifters))
 
+;; ({:reader r})->Promise<{:val v :writer w}
 (deftype PRW [lifters]
   Monad
   (-bind [m wmv f]
