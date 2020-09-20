@@ -261,6 +261,70 @@
 (def promise-ctx
   (Promise. promise-lifters))
 
+(deftype PRW [lifters]
+  Monad
+  (-bind [m wmv f]
+    (MVWrapper.
+     m
+     (fn [{r :reader :as args}]
+       (p/chain
+        ((-mv (-lift m wmv)) args)
+        (fn [{w :writer v :val}]
+          (p/all [w ((-mv (-lift m (f v))) {:reader r})]))
+        (fn [[w {w' :writer v' :val}]]
+          (p/resolved
+           {:writer ((fnil into []) w w')
+            :val v'}))))))
+  (-return [m v]
+    (MVWrapper.
+     m
+     (fn [{r :reader}]
+       (p/resolved
+        {:writer nil :val v}))))
+  (-lift [m mv]
+    (lift m lifters mv))
+  MonadZero
+  (-mzero [m]
+    (MVWrapper.
+     m
+     (fn [{r :reader}]
+       (p/rejected
+        (ex-info
+         ":mopr.control.monad/mzero"
+         {:writer [::mzero]
+          :val nil}))))))
+
+(defmethod -lets (.getName PRW)
+  [_ m]
+  `[~'ask (fn [] (MVWrapper.
+                  ~m
+                  (fn [{r# :reader}]
+                    (p/resolved
+                     {:writer nil :val r#}))))
+    ~'tell (fn [v#] (MVWrapper.
+                     ~m
+                     (fn [{r# :reader}]
+                       (p/resolved
+                        {:writer [v#] :val nil}))))])
+
+(def prw-lifters
+  {identity-ctx (fn [mv]
+                  (fn [{r :reader}]
+                    (p/resolved
+                     {:writer nil :val mv})))
+   promise-ctx (fn [mv]
+                 (fn [{r :reader}]
+                   (p/chain
+                    mv
+                    (fn [v]
+                      {:writer nil :val v}))))})
+
+(def prw-ctx (PRW. prw-lifters))
+
+(defn run-prw
+  [wmv rw]
+  ((-mv wmv) rw))
+
 
 ;; ({:reader r :state st})->Promise<{:val v :writer w :state st}
 (deftype PRWS [lifters]
@@ -281,7 +345,7 @@
   (-return [m v]
     (MVWrapper.
      m
-     (fn [{r :reader w :writer st :state}]
+     (fn [{r :reader st :state}]
        (p/resolved
         {:writer nil :state st :val v}))))
   (-lift [m mv]
@@ -290,34 +354,36 @@
   (-mzero [m]
     (MVWrapper.
      m
-     (fn [{r :reader w :writer st :state}]
+     (fn [{r :reader st :state}]
        (p/rejected
         (ex-info
          ":mopr.control.monad/mzero"
-         {:writer [::mzero] :state st :val nil}))))))
+         {:writer [::mzero]
+          :state st
+          :val nil}))))))
 
 (defmethod -lets (.getName PRWS)
   [_ m]
   `[~'ask (fn [] (MVWrapper.
-                 ~m
-                 (fn [{r# :reader w# :writer st# :state}]
-                   (p/resolved
-                    {:writer nil :state st# :val r#}))))
+                  ~m
+                  (fn [{r# :reader st# :state}]
+                    (p/resolved
+                     {:writer nil :state st# :val r#}))))
     ~'tell (fn [v#] (MVWrapper.
-                    ~m
-                    (fn [{r# :reader w# :writer st# :state}]
-                      (p/resolved
-                       {:writer [v#] :state st# :val nil}))))
+                     ~m
+                     (fn [{r# :reader st# :state}]
+                       (p/resolved
+                        {:writer [v#] :state st# :val nil}))))
     ~'get-state (fn [] (MVWrapper.
-                       ~m
-                       (fn [{r# :reader w# :writer st# :state}]
-                         (p/resolved
-                          {:writer nil :state st# :val st#}))))
+                        ~m
+                        (fn [{r# :reader st# :state}]
+                          (p/resolved
+                           {:writer nil :state st# :val st#}))))
     ~'put-state (fn [st'#] (MVWrapper.
-                           ~m
-                           (fn [{r# :reader w# :writer st# :state}]
-                             (p/resolved
-                              {:writer nil :state st'# :val nil}))))])
+                            ~m
+                            (fn [{r# :reader st# :state}]
+                              (p/resolved
+                               {:writer nil :state st'# :val nil}))))])
 
 (def prws-lifters
   {identity-ctx (fn [mv]
@@ -429,6 +495,19 @@
      (return (+ a b)))
    {:reader {:bar 10}
     :state {:fip 12}})
+
+  @(m/run-prw
+    (m/mlet m/prw-ctx
+      [a (ask)
+       b (return 22)
+       c (return (+ a b))
+       _ (tell c)
+       d (m/mlet m/promise-ctx
+           [a (return 100)
+            b (return 100)]
+           (return (* a a)))]
+      (return (+ c d)))
+    {:reader 10})
 
   @(m/run-prws
     (m/mlet m/prws-ctx
