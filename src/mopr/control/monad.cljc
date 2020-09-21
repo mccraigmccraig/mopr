@@ -159,6 +159,10 @@
   [wmv env]
   ((unbox wmv) env))
 
+(defprotocol IWriter
+  (-tell [m v])
+  (-listen [m mv]))
+
 (deftype Writer []
   Monad
   (-bind [m wmv f]
@@ -170,12 +174,18 @@
   (-return [m v]
     (box
      m
-     {:val v :w nil})))
+     {:val v :w nil}))
+
+  IWriter
+  (-tell [m v]
+    (box m {:val nil :w [v]}))
+  (-listen [m mv]
+    (box m {:val (unbox mv) :w nil})))
 
 (defmethod -lets (.getName Writer)
   [_ m]
-  `[~'tell (fn [v#] (box ~m {:val nil :w [v#]}))
-    ~'listen (fn [mv#] (box ~m {:val (unbox mv#) :w nil}))])
+  `[~'tell (fn [v#] (-tell ~m v#))
+    ~'listen (fn [mv#] (-listen ~m mv#))])
 
 (def writer-ctx (Writer.))
 
@@ -229,15 +239,21 @@
     (box
      m
      (fn [{r :reader w :writer st :state}]
-       {:writer nil :state st :val r}))))
+       {:writer nil :state st :val r})))
+
+  IWriter
+  (-tell [m v]
+    (box
+     m
+     (fn [{r :reader w :writer st :state}]
+       {:writer [v] :state st :val nil})))
+  (-listen [m mv]))
 
 (defmethod -lets (.getName RWS)
   [_ m]
   `[~'ask (fn [] (-ask ~m))
-    ~'tell (fn [v#] (box
-                    ~m
-                    (fn [{r# :reader w# :writer st# :state}]
-                      {:writer [v#] :state st# :val nil})))
+    ~'tell (fn [v#] (-tell ~m v#))
+    ~'listen (fn [mv#] (-listen ~m mv#))
     ~'get-state (fn [] (box
                        ~m
                        (fn [{r# :reader w# :writer st# :state}]
@@ -318,16 +334,22 @@
      m
      (fn [{r :reader}]
        (p/resolved
-        {:writer nil :val r})))))
+        {:writer nil :val r}))))
+
+  IWriter
+  (-tell [m v]
+    (box
+     m
+     (fn [{r :reader}]
+       (p/resolved
+        {:writer [v] :val nil}))))
+  (-listen [m mv]))
 
 (defmethod -lets (.getName PRW)
   [_ m]
   `[~'ask (fn [] (-ask ~m))
-    ~'tell (fn [v#] (box
-                     ~m
-                     (fn [{r# :reader}]
-                       (p/resolved
-                        {:writer [v#] :val nil}))))])
+    ~'tell (fn [v#] (-tell ~m v#))
+    ~'listen (fn [mv#] (-listen ~m mv#))])
 
 (def prw-lifters
   {identity-ctx (fn [mv]
@@ -390,16 +412,22 @@
      m
      (fn [{r :reader st :state}]
        (p/resolved
-        {:writer nil :state st :val r})))))
+        {:writer nil :state st :val r}))))
+
+  IWriter
+  (-tell [m v]
+    (box
+     m
+     (fn [{r :reader st :state}]
+       (p/resolved
+        {:writer [v] :state st :val nil}))))
+  (-listen [m mv]))
 
 (defmethod -lets (.getName PRWS)
   [_ m]
   `[~'ask (fn [] (-ask ~m))
-    ~'tell (fn [v#] (box
-                     ~m
-                     (fn [{r# :reader st# :state}]
-                       (p/resolved
-                        {:writer [v#] :state st# :val nil}))))
+    ~'tell (fn [v#] (-tell ~m v#))
+    ~'listen (fn [mv#] (-listen ~m mv#))
     ~'get-state (fn [] (box
                         ~m
                         (fn [{r# :reader st# :state}]
